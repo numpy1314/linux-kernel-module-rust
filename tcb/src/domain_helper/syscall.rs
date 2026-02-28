@@ -85,32 +85,49 @@ impl CoreFunction for DomainSyscall {
         Ok(())
     }
 
+    /// sys_update_domain - 系统调用：更新domain（热升级入口点）
+    /// 
+    /// 这是热升级的主要入口，处理不同类型的domain升级：
+    /// 1. 查找旧domain
+    /// 2. 根据domain类型创建新domain
+    /// 3. 调用代理层的replace方法执行原子替换
+    /// 4. 更新domain信息表
     fn sys_update_domain(
         &self,
-        old_domain_name: &str,
-        new_domain_name: &str,
-        ty: DomainTypeRaw,
+        old_domain_name: &str,   // 旧domain名称
+        new_domain_name: &str,   // 新domain名称（ELF文件名）
+        ty: DomainTypeRaw,       // domain类型
     ) -> LinuxResult<()> {
+        // 步骤1: 查找旧domain
         let old_domain = super::query_domain(old_domain_name);
         let old_domain_id = old_domain.as_ref().map(|d| d.domain_id());
+        
+        // 步骤2: 根据domain类型执行不同的升级逻辑
         let (domain_info, new_domain_id) = match old_domain {
+            // 情况1: LogDomain类型
             Some(DomainType::LogDomain(logger)) => {
                 let old_domain_id = logger.domain_id();
+                // 创建新domain实例，传递旧domain ID用于状态迁移
                 let (id, new_domain, loader) = creator::create_domain_or_empty::<LogDomainProxy, _>(
                     ty,
                     new_domain_name,
                     None,
-                    Some(old_domain_id),
+                    Some(old_domain_id),  // 传递旧domain ID
                 );
                 let logger_proxy = logger.downcast_arc::<LogDomainProxy>().unwrap();
                 let domain_info = loader.domain_file_info();
+                
+                // 关键步骤：调用代理层的replace方法执行原子替换
                 logger_proxy.replace(new_domain, loader)?;
+                
                 println!(
-                    "Try to replace logger domain {} with {} ok",
+                    "日志domain热升级成功: {} -> {}",
                     old_domain_name, new_domain_name
                 );
                 Ok((domain_info, id))
             }
+            
+            // 情况2: EmptyDeviceDomain类型
             Some(DomainType::EmptyDeviceDomain(empty_device)) => {
                 let old_domain_id = empty_device.domain_id();
                 let (id, new_domain, loader) = creator::create_domain_or_empty::<
@@ -123,13 +140,18 @@ impl CoreFunction for DomainSyscall {
                     .downcast_arc::<EmptyDeviceDomainProxy>()
                     .unwrap();
                 let domain_info = loader.domain_file_info();
+                
+                // 执行原子替换
                 empty_device.replace(new_domain, loader)?;
+                
                 println!(
-                    "Try to replace empty device domain {} with {} ok",
+                    "空设备domain热升级成功: {} -> {}",
                     old_domain_name, new_domain_name
                 );
                 Ok((domain_info, id))
             }
+            
+            // 情况3: BlockDeviceDomain类型
             Some(DomainType::BlockDeviceDomain(block_device)) => {
                 let old_domain_id = block_device.domain_id();
                 let (id, new_domain, loader) = creator::create_domain_or_empty::<
@@ -142,31 +164,41 @@ impl CoreFunction for DomainSyscall {
                     .downcast_arc::<BlockDeviceDomainProxy>()
                     .unwrap();
                 let domain_info = loader.domain_file_info();
+                
+                // 执行原子替换
                 block_device.replace(new_domain, loader)?;
+                
                 println!(
-                    "Try to replace block device domain {} with {} ok",
+                    "块设备domain热升级成功: {} -> {}",
                     old_domain_name, new_domain_name
                 );
                 Ok((domain_info, id))
             }
+            
+            // 情况4: 旧domain不存在
             None => {
                 println!(
-                    "<sys_update_domain> old domain {:?} not found",
+                    "<sys_update_domain> 错误：找不到旧domain {:?}",
                     old_domain_name
                 );
                 Err(LinuxError::EINVAL)
             }
-        }?;
+        }?;  // 如果出错，这里会提前返回
+        
+        // 步骤3: 更新domain信息表
         let domain_data = DomainDataInfo {
-            name: old_domain_name.to_string(),
+            name: old_domain_name.to_string(),  // 保持名称不变
             ty,
-            panic_count: 0,
+            panic_count: 0,  // 重置panic计数
             file_info: domain_info,
         };
 
+        // 原子地更新全局domain信息
         let mut info = DOMAIN_INFO.lock();
-        info.domain_list.remove(&old_domain_id.unwrap());
-        info.domain_list.insert(new_domain_id, domain_data);
+        info.domain_list.remove(&old_domain_id.unwrap());  // 移除旧记录
+        info.domain_list.insert(new_domain_id, domain_data);  // 插入新记录
+        
+        println!("domain信息表更新完成: 旧ID={:?} -> 新ID={}", old_domain_id, new_domain_id);
         Ok(())
     }
     fn sys_reload_domain(&self, domain_name: &str) -> LinuxResult<()> {
